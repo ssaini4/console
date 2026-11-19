@@ -1,11 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { type Content, GoogleGenAI, type Part } from '@google/genai';
+import { type Content, GoogleGenAI, Modality, type Part } from '@google/genai';
 import OpenAI from 'openai';
-import type { Tool } from './mcp';
 
 export type Kind = 'anthropic' | 'openai' | 'gemini';
 export type Call = { id: string; name: string; args: Record<string, unknown> };
-export type Result = { id: string; name: string; content: string; isError?: boolean };
+export type Result = { id: string; name: string; content: string; isError?: boolean; image?: string };
+/** What a model sees of a tool. */
+export type ToolSpec = { name: string; description: string; schema: Record<string, unknown> };
 export type Msg = {
   role: 'user' | 'assistant' | 'tool';
   alias: string | null;
@@ -20,8 +21,9 @@ export type StepIn = {
   model: string;
   system: string;
   history: Msg[];
-  tools: Tool[];
+  tools: ToolSpec[];
   onText: (delta: string) => void;
+  onThinking: (delta: string) => void;
 };
 export type StepOut = { text: string; calls: Call[]; raw: unknown; note?: string };
 
@@ -45,6 +47,8 @@ const native = (m: Msg, kind: Kind) => m.role !== 'user' && m.kind === kind;
 
 // Models that accept server-side refusal fallbacks.
 const FALLBACKS = /^claude-(fable-5-[12]|opus-5|opus-5-5|sonnet-5-5)$/;
+// Models that take adaptive thinking; older ones 400 on it.
+const ADAPTIVE = /^claude-(fable|mythos|opus-5|opus-4-[678]|sonnet-5|sonnet-4-6|haiku-5)/;
 
 async function anthropicStep(p: StepIn): Promise<StepOut> {
   const client = new Anthropic({ apiKey: p.apiKey });
@@ -78,11 +82,14 @@ async function anthropicStep(p: StepIn): Promise<StepOut> {
     system: p.system,
     messages,
     ...(tools.length ? { tools } : {}),
+    // Default display is "omitted" (empty text); ask for readable summaries to show the user.
+    ...(ADAPTIVE.test(p.model) ? { thinking: { type: 'adaptive' as const, display: 'summarized' as const } } : {}),
     ...(FALLBACKS.test(p.model)
       ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
       : {}),
   });
   stream.on('text', p.onText);
+  stream.on('thinking', (delta) => p.onThinking(delta));
   const msg = await stream.finalMessage();
   const calls = msg.content.flatMap((b) =>
     b.type === 'tool_use' ? [{ id: b.id, name: b.name, args: b.input as Record<string, unknown> }] : [],
@@ -177,6 +184,8 @@ async function geminiStep(p: StepIn): Promise<StepOut> {
     contents,
     config: {
       systemInstruction: p.system,
+      // ponytail: name-based guard; older models reject thinkingConfig.
+      ...(/gemini-(2\.5|[3-9])/.test(p.model) ? { thinkingConfig: { includeThoughts: true } } : {}),
       ...(p.tools.length
         ? {
             tools: [
@@ -199,7 +208,8 @@ async function geminiStep(p: StepIn): Promise<StepOut> {
     const cand = chunk.candidates?.[0];
     for (const part of cand?.content?.parts ?? []) {
       parts.push(part);
-      if (part.text && !part.thought) {
+      if (part.text && part.thought) p.onThinking(part.text);
+      else if (part.text) {
         text += part.text;
         p.onText(part.text);
       }
@@ -219,6 +229,33 @@ export const steps: Record<Kind, (p: StepIn) => Promise<StepOut>> = {
   openai: openaiStep,
   gemini: geminiStep,
 };
+
+/** One image from the provider's image model. Anthropic has none. */
+export async function generateImage(kind: Kind, apiKey: string, prompt: string): Promise<{ mime: string; data: Buffer }> {
+  // ponytail: picks the alphabetically last matching model id (≈ newest); add a setting if that picks wrong.
+  const pick = async (re: RegExp) => {
+    const model = (await listModels(kind, apiKey)).filter((m) => re.test(m)).at(-1);
+    if (!model) throw new Error(`No image model available for this ${kind} key.`);
+    return model;
+  };
+  if (kind === 'openai') {
+    const r = await new OpenAI({ apiKey }).images.generate({ model: await pick(/^gpt-image/), prompt });
+    const b64 = r.data?.[0]?.b64_json;
+    if (!b64) throw new Error('The image model returned no image.');
+    return { mime: 'image/png', data: Buffer.from(b64, 'base64') };
+  }
+  if (kind === 'gemini') {
+    const r = await new GoogleGenAI({ apiKey }).models.generateContent({
+      model: await pick(/^gemini-.*image/),
+      contents: prompt,
+      config: { responseModalities: [Modality.TEXT, Modality.IMAGE] },
+    });
+    const img = r.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData;
+    if (!img?.data) throw new Error(r.text || 'The image model returned no image.');
+    return { mime: img.mimeType ?? 'image/png', data: Buffer.from(img.data, 'base64') };
+  }
+  throw new Error(`${kind} cannot generate images.`);
+}
 
 /** Model ids the key can use; also validates the key. */
 export async function listModels(kind: Kind, apiKey: string): Promise<string[]> {
