@@ -1,0 +1,24 @@
+{
+  "name": "console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development DEV_AUTH=1 bun --watch src/index.ts",
+    "migrate": "bun src/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.10.0",
+    "@google/genai": "3.6.1",
+    "@micro-cloud/sdk": "file:./vendor/sdk",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "hono": "4.13.18",
+    "openai": "7.60.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "typescript": "7.0.2"
+  }
+}

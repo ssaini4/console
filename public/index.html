@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Console</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@18.2.1/lib/marked.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.18/dist/purify.min.js"></script>
+<style>
+:root{--bg:#faf9f7;--panel:#f1efeb;--card:#fff;--text:#1f1e1c;--muted:#76726b;--line:#e3e0da;--accent:#c96442;--accent-ink:#fff;--warn:#fff4e5;--warn-line:#f0c58a;--err:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#1e1d1b;--panel:#262523;--card:#2c2b28;--text:#ecebe8;--muted:#a19d95;--line:#3a3935;--accent:#d97757;--accent-ink:#1e1d1b;--warn:#3a2f1f;--warn-line:#7a5a2c;--err:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,sans-serif;height:100vh;display:flex;overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 12px}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button.ghost{border-color:transparent;background:transparent}
+button:disabled{opacity:.5;cursor:default}
+input,select,textarea{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 10px;min-width:0}
+aside{width:260px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0}
+aside header{padding:14px;display:flex;gap:8px;align-items:center}
+aside header b{flex:1;font-size:16px}
+#chats{flex:1;overflow-y:auto;padding:0 8px}
+.chat-item{display:flex;align-items:center;border-radius:8px;padding:6px 10px;cursor:pointer;gap:6px}
+.chat-item:hover,.chat-item.active{background:var(--line)}
+.chat-item span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat-item button{padding:0 6px;visibility:hidden}
+.chat-item:hover button{visibility:visible}
+aside footer{padding:10px 14px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
+aside footer a{color:var(--muted);font-size:13px;margin-left:auto}
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+#log{flex:1;overflow-y:auto;padding:24px 16px}
+.inner{max-width:780px;margin:0 auto}
+.msg{margin:0 0 20px}
+.msg.user .bubble{background:var(--panel);border-radius:14px;padding:10px 14px;display:inline-block;max-width:100%;white-space:pre-wrap;word-wrap:break-word}
+.msg.user{text-align:right}.msg.user .bubble{text-align:left}
+.who{font-size:12px;color:var(--muted);margin-bottom:4px}
+.who b{color:var(--accent)}
+.md{overflow-wrap:anywhere}.md pre{background:var(--panel);padding:10px;border-radius:8px;overflow-x:auto}.md code{font-size:13px}
+.md table{border-collapse:collapse}.md td,.md th{border:1px solid var(--line);padding:4px 8px}
+details.tool{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--card);font-size:13px}
+details.tool summary{padding:6px 10px;cursor:pointer;color:var(--muted)}
+details.tool pre{margin:0;padding:8px 10px;border-top:1px solid var(--line);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
+.err-text{color:var(--err)}
+.note{font-size:13px;color:var(--muted);font-style:italic;margin:4px 0}
+.confirm{border:1px solid var(--warn-line);background:var(--warn);border-radius:10px;padding:12px;margin:8px 0}
+.confirm .row{margin:8px 0}.confirm pre{background:var(--card);border-radius:6px;padding:8px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto;margin:6px 0}
+.confirm .actions{display:flex;gap:6px;flex-wrap:wrap}
+#composer{padding:12px 16px 18px}
+#chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;font-size:13px}
+.chip{border:1px solid var(--line);border-radius:999px;padding:2px 10px;cursor:pointer;background:var(--card)}
+.chip.on{border-color:var(--accent);color:var(--accent)}
+.box{display:flex;gap:8px;align-items:flex-end;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:8px}
+.box textarea{flex:1;border:0;resize:none;max-height:240px;outline:none;background:transparent;padding:6px}
+.empty{color:var(--muted);text-align:center;margin-top:20vh}
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--bg);color:var(--text);width:min(760px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:0}
+dialog::backdrop{background:#0006}
+.dlg-head{display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
+.dlg-head b{flex:1;font-size:16px}
+.dlg-body{padding:6px 18px 18px}
+h3{margin:18px 0 8px;font-size:14px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--card)}
+.card .top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.card .top b{margin-right:auto}
+.small{font-size:12px;color:var(--muted)}
+form.add{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+form.add input{flex:1 1 140px}
+.tag{display:inline-flex;gap:4px;align-items:center;border:1px solid var(--line);border-radius:6px;padding:0 6px;font-size:12px;margin:2px}
+.tag button{border:0;padding:0 2px;background:none}
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:8px 14px;border-radius:8px;display:none;z-index:10}
+#menu{display:none}
+@media (max-width:720px){aside{position:fixed;inset:0 auto 0 0;z-index:5;transform:translateX(-100%);transition:transform .2s}aside.open{transform:none}#menu{display:inline-block}}
+</style>
+</head>
+<body>
+<aside id="side">
+  <header><b>Console</b><button class="primary" id="new">New chat</button></header>
+  <div id="chats"></div>
+  <footer><button id="open-settings">Settings</button><a href="/auth/logout">Sign out</a></footer>
+</aside>
+<main>
+  <div style="padding:8px 16px"><button id="menu" class="ghost">☰</button></div>
+  <div id="log"><div class="inner" id="msgs"></div></div>
+  <div id="composer"><div class="inner">
+    <div id="chips"></div>
+    <div class="box">
+      <textarea id="input" rows="1" placeholder="Message… use @alias to pick a model"></textarea>
+      <button class="primary" id="send">Send</button>
+    </div>
+  </div></div>
+</main>
+
+<dialog id="settings">
+  <div class="dlg-head"><b>Settings</b><button class="ghost" id="close-settings">✕</button></div>
+  <div class="dlg-body">
+    <h3>Model providers</h3>
+    <div id="providers"></div>
+    <form class="add" id="add-provider">
+      <select name="kind"><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select>
+      <input name="alias" placeholder="alias, e.g. claude" required pattern="[a-z0-9_\-]{1,32}" />
+      <input name="apiKey" type="password" placeholder="API key" required autocomplete="off" />
+      <button class="primary">Add</button>
+    </form>
+    <p class="small">Keys are checked against the provider, then stored encrypted. They are never sent back to this page.</p>
+
+    <h3>MCP servers</h3>
+    <div id="servers"></div>
+    <form class="add" id="add-server">
+      <input name="name" placeholder="name, e.g. linear" required pattern="[a-zA-Z0-9_\-]{1,32}" />
+      <input name="url" type="url" placeholder="https://…/mcp" required style="flex:2 1 220px" />
+      <input name="token" type="password" placeholder="Bearer token (optional)" autocomplete="off" />
+      <button class="primary">Add</button>
+    </form>
+    <p class="small">Remote servers over streamable HTTP. Use <b>Connect</b> for servers that sign in with OAuth, or give a bearer token.</p>
+  </div>
+</dialog>
+<div id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const e = Object.assign(document.createElement(tag), props);
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+};
+const md = (t) => DOMPurify.sanitize(marked.parse(t || ''));
+const toast = (t) => { const x = $('#toast'); x.textContent = t; x.style.display = 'block'; setTimeout(() => (x.style.display = 'none'), 3500); };
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'content-type': 'application/json' } : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+let state = { providers: [], servers: [], chats: [] };
+let current = null;   // chat id
+let selected = null;  // alias for the next message
+let busy = false;
+
+async function refresh() {
+  state = await api('/api/state');
+  renderChats(); renderChips(); renderSettings();
+}
+
+// ------------------------------------------------------------ sidebar
+function renderChats() {
+  const box = $('#chats'); box.replaceChildren();
+  for (const c of state.chats) {
+    const del = el('button', { className: 'ghost', textContent: '✕', title: 'Delete chat' });
+    del.onclick = async (ev) => {
+      ev.stopPropagation();
+      if (!confirm('Delete this chat?')) return;
+      await api(`/api/chats/${c.id}`, { method: 'DELETE', body: {} });
+      if (current === c.id) { current = null; renderMessages([]); }
+      refresh();
+    };
+    const item = el('div', { className: 'chat-item' + (c.id === current ? ' active' : '') }, el('span', { textContent: c.title }), del);
+    item.onclick = () => openChat(c.id);
+    box.append(item);
+  }
+}
+
+async function openChat(id) {
+  current = id; $('#side').classList.remove('open');
+  history.replaceState(null, '', `/?chat=${id}`);
+  const { messages } = await api(`/api/chats/${id}`);
+  renderMessages(messages); renderChats();
+  const last = [...messages].reverse().find((m) => m.alias);
+  if (last && state.providers.some((p) => p.alias === last.alias)) { selected = last.alias; renderChips(); }
+}
+
+// ------------------------------------------------------------ messages
+function toolBlock(call, result) {
+  const d = el('details', { className: 'tool' });
+  const status = result ? (result.isError ? ' · error' : ' · done') : ' · waiting';
+  d.append(el('summary', { textContent: `🔧 ${call.name}${status}` }));
+  d.append(el('pre', { textContent: JSON.stringify(call.args, null, 2) }));
+  if (result) d.append(el('pre', { textContent: result.content, className: result.isError ? 'err-text' : '' }));
+  return d;
+}
+
+function assistantNode(alias, model) {
+  const body = el('div', { className: 'md' });
+  const tools = el('div');
+  const node = el('div', { className: 'msg assistant' }, el('div', { className: 'who' }, el('b', { textContent: '@' + alias }), ` · ${model || ''}`), body, tools);
+  return { node, body, tools };
+}
+
+function renderMessages(messages) {
+  const box = $('#msgs'); box.replaceChildren();
+  if (!messages.length) { box.append(el('div', { className: 'empty', textContent: state.providers.length ? 'Start a conversation. Type @ to pick a model.' : 'Add a model provider in Settings to begin.' })); return; }
+  const results = new Map();
+  for (const m of messages) if (m.role === 'tool') for (const r of m.tool_results) results.set(r.id, r);
+  for (const m of messages) {
+    if (m.role === 'user') box.append(el('div', { className: 'msg user' }, el('div', { className: 'bubble', textContent: m.text })));
+    else if (m.role === 'assistant') {
+      const a = assistantNode(m.alias, m.model);
+      a.body.innerHTML = md(m.text);
+      for (const c of m.tool_calls) a.tools.append(toolBlock(c, results.get(c.id)));
+      box.append(a.node);
+    }
+  }
+  const last = messages.at(-1);
+  if (last?.role === 'assistant' && last.tool_calls.length) {
+    const servers = state.servers;
+    box.append(confirmCard(last.tool_calls.map((c) => {
+      const s = servers.find((s) => c.name.startsWith(s.name.replace(/[^a-zA-Z0-9_-]/g, '_') + '__'));
+      return { ...c, server: s?.name || '?', tool: s ? c.name.slice(s.name.length + 2) : c.name };
+    })));
+  }
+  scrollDown();
+}
+
+function confirmCard(calls) {
+  const decisions = {};
+  const card = el('div', { className: 'confirm' }, el('b', { textContent: calls.length > 1 ? `Allow ${calls.length} tool calls?` : 'Allow this tool call?' }));
+  for (const c of calls) {
+    decisions[c.id] = 'deny';
+    const btns = ['allow', 'always', 'deny'].map((d) => {
+      const b = el('button', { textContent: { allow: 'Allow once', always: `Always allow ${c.tool}`, deny: 'Deny' }[d] });
+      b.onclick = () => { decisions[c.id] = d; btns.forEach((x) => x.classList.remove('primary')); b.classList.add('primary'); };
+      return b;
+    });
+    btns[2].classList.add('primary');
+    card.append(el('div', { className: 'row' }, el('div', {}, el('b', { textContent: c.tool }), el('span', { className: 'small', textContent: ` on ${c.server}` })), el('pre', { textContent: JSON.stringify(c.args, null, 2) }), el('div', { className: 'actions' }, ...btns)));
+  }
+  if (calls.length > 1) {
+    const all = el('button', { textContent: 'Allow all once' });
+    all.onclick = () => { for (const c of calls) decisions[c.id] = 'allow'; submit(); };
+    card.append(el('div', { className: 'actions' }, all));
+  }
+  const go = el('button', { className: 'primary', textContent: 'Continue' });
+  const submit = () => { card.remove(); stream(`/api/chats/${current}/resume`, { decisions }); };
+  go.onclick = submit;
+  card.append(el('div', { className: 'actions', style: 'margin-top:8px' }, go));
+  return card;
+}
+
+const scrollDown = () => { const l = $('#log'); l.scrollTop = l.scrollHeight; };
+
+// ------------------------------------------------------------ streaming
+async function stream(path, body) {
+  busy = true; $('#send').disabled = true;
+  const box = $('#msgs');
+  let cur = null, text = '';
+  const results = new Map();
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok || !r.body) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const data = chunk.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trimStart()).join('\n');
+        if (!data) continue;
+        const e = JSON.parse(data);
+        if (e.type === 'start') { cur = assistantNode(e.alias, e.model); text = ''; box.append(cur.node); }
+        else if (e.type === 'text' && cur) { text += e.delta; cur.body.innerHTML = md(text); }
+        else if (e.type === 'calls' && cur) { cur.calls = e.calls; for (const c of e.calls) cur.tools.append(toolBlock(c)); }
+        else if (e.type === 'results') {
+          for (const r of e.results) results.set(r.id, r);
+          for (const node of box.querySelectorAll('.msg.assistant')) node._done = true;
+          if (cur?.calls) { cur.tools.replaceChildren(...cur.calls.map((c) => toolBlock(c, results.get(c.id)))); }
+        }
+        else if (e.type === 'confirm') box.append(confirmCard(e.calls));
+        else if (e.type === 'note') box.append(el('div', { className: 'note', textContent: e.text }));
+        else if (e.type === 'error') box.append(el('div', { className: 'note err-text', textContent: e.message }));
+        scrollDown();
+      }
+    }
+  } catch (err) {
+    box.append(el('div', { className: 'note err-text', textContent: err.message }));
+  } finally {
+    busy = false; $('#send').disabled = false;
+    refresh();
+  }
+}
+
+async function send() {
+  const input = $('#input');
+  let text = input.value.trim();
+  if (!text || busy) return;
+  if (!state.providers.length) { openSettings(); return; }
+  if (selected && !/(^|\s)@[a-z0-9_-]+/.test(text)) text = `@${selected} ${text}`;
+  if (!current) { const c = await api('/api/chats', { method: 'POST', body: {} }); current = c.id; history.replaceState(null, '', `/?chat=${c.id}`); $('#msgs').replaceChildren(); }
+  input.value = ''; autosize();
+  $('#msgs').querySelector('.empty')?.remove();
+  $('#msgs').querySelectorAll('.confirm').forEach((c) => c.remove());
+  $('#msgs').append(el('div', { className: 'msg user' }, el('div', { className: 'bubble', textContent: text })));
+  const m = text.match(/(?:^|\s)@([a-z0-9_-]+)/);
+  if (m && state.providers.some((p) => p.alias === m[1])) { selected = m[1]; renderChips(); }
+  scrollDown();
+  await stream(`/api/chats/${current}/send`, { text });
+}
+
+function renderChips() {
+  const box = $('#chips'); box.replaceChildren();
+  if (!selected || !state.providers.some((p) => p.alias === selected)) selected = state.providers[0]?.alias || null;
+  for (const p of state.providers) {
+    const c = el('span', { className: 'chip' + (p.alias === selected ? ' on' : ''), textContent: `@${p.alias}`, title: p.model });
+    c.onclick = () => { selected = p.alias; renderChips(); $('#input').focus(); };
+    box.append(c);
+  }
+}
+
+function autosize() { const t = $('#input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 240) + 'px'; }
+$('#input').addEventListener('input', autosize);
+$('#input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+$('#send').onclick = send;
+$('#new').onclick = () => { current = null; history.replaceState(null, '', '/'); renderMessages([]); renderChats(); $('#input').focus(); $('#side').classList.remove('open'); };
+$('#menu').onclick = () => $('#side').classList.toggle('open');
+
+// ------------------------------------------------------------ settings
+function openSettings() { renderSettings(); $('#settings').showModal(); }
+$('#open-settings').onclick = openSettings;
+$('#close-settings').onclick = () => $('#settings').close();
+
+function renderSettings() {
+  const pbox = $('#providers'); pbox.replaceChildren();
+  for (const p of state.providers) {
+    const sel = el('select', {}, el('option', { textContent: p.model || '(choose a model)', value: p.model }));
+    sel.onfocus = async () => {
+      if (sel.dataset.loaded) return; sel.dataset.loaded = '1';
+      try {
+        const { models } = await api(`/api/providers/${p.id}/models`);
+        sel.replaceChildren(...models.map((m) => el('option', { value: m, textContent: m, selected: m === p.model })));
+      } catch (e) { toast(e.message); }
+    };
+    sel.onchange = async () => { await api(`/api/providers/${p.id}`, { method: 'PATCH', body: { model: sel.value } }); toast(`@${p.alias} now uses ${sel.value}`); refresh(); };
+    const del = el('button', { textContent: 'Remove' });
+    del.onclick = async () => { if (confirm(`Remove @${p.alias} and its key?`)) { await api(`/api/providers/${p.id}`, { method: 'DELETE', body: {} }); refresh(); } };
+    const rekey = el('button', { textContent: 'Replace key' });
+    rekey.onclick = async () => { const k = prompt(`New API key for @${p.alias}`); if (k) { try { await api(`/api/providers/${p.id}`, { method: 'PATCH', body: { apiKey: k.trim() } }); toast('Key replaced'); refresh(); } catch (e) { toast(e.message); } } };
+    pbox.append(el('div', { className: 'card' }, el('div', { className: 'top' }, el('b', { textContent: `@${p.alias}` }), el('span', { className: 'small', textContent: `${p.kind} · key ${p.key_hint}` }), sel, rekey, del)));
+  }
+  if (!state.providers.length) pbox.append(el('p', { className: 'small', textContent: 'No providers yet.' }));
+
+  const sbox = $('#servers'); sbox.replaceChildren();
+  for (const s of state.servers) {
+    const en = el('input', { type: 'checkbox', checked: s.enabled, title: 'Enabled' });
+    en.onchange = async () => { await api(`/api/mcp/${s.id}`, { method: 'PATCH', body: { enabled: en.checked } }); refresh(); };
+    const connect = el('button', { textContent: s.connected ? 'Reconnect' : 'Connect' });
+    connect.onclick = async () => {
+      try {
+        const { redirect } = await api(`/api/mcp/${s.id}/connect`, { method: 'POST', body: {} });
+        if (redirect) location.href = redirect; else toast(`${s.name} is already connected`);
+      } catch (e) { toast(e.message); }
+    };
+    const test = el('button', { textContent: 'Test' });
+    const info = el('div', { className: 'small' });
+    test.onclick = async () => {
+      info.textContent = 'Connecting…';
+      try { const { tools } = await api(`/api/mcp/${s.id}/tools`); info.textContent = `${tools.length} tools: ${tools.map((t) => t.name).join(', ')}`; }
+      catch (e) { info.textContent = e.message; info.className = 'small err-text'; }
+    };
+    const del = el('button', { textContent: 'Remove' });
+    del.onclick = async () => { if (confirm(`Remove ${s.name}?`)) { await api(`/api/mcp/${s.id}`, { method: 'DELETE', body: {} }); refresh(); } };
+    const allowed = el('div', { className: 'small' }, s.always_allow.length ? 'Always allowed: ' : '');
+    for (const t of s.always_allow) {
+      const x = el('button', { textContent: '✕', title: 'Ask again' });
+      x.onclick = async () => { await api(`/api/mcp/${s.id}`, { method: 'PATCH', body: { always_allow: s.always_allow.filter((a) => a !== t) } }); refresh(); };
+      allowed.append(el('span', { className: 'tag' }, t, x));
+    }
+    const status = s.connected ? 'OAuth connected' : s.hasHeaders ? 'bearer token' : 'no auth';
+    sbox.append(el('div', { className: 'card' }, el('div', { className: 'top' }, en, el('b', { textContent: s.name }), el('span', { className: 'small', textContent: status }), test, connect, del), el('div', { className: 'small', textContent: s.url }), allowed, info));
+  }
+  if (!state.servers.length) sbox.append(el('p', { className: 'small', textContent: 'No MCP servers yet.' }));
+}
+
+$('#add-provider').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target), btn = e.target.querySelector('button');
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    await api('/api/providers', { method: 'POST', body: { kind: f.get('kind'), alias: f.get('alias').trim(), apiKey: f.get('apiKey').trim() } });
+    e.target.reset(); toast('Provider added'); await refresh();
+  } catch (err) { toast(err.message); }
+  btn.disabled = false; btn.textContent = 'Add';
+};
+
+$('#add-server').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const token = f.get('token').trim();
+  try {
+    await api('/api/mcp', { method: 'POST', body: { name: f.get('name').trim(), url: f.get('url').trim(), ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}) } });
+    e.target.reset(); toast('Server added. Use Test, or Connect if it needs sign-in.'); await refresh();
+  } catch (err) { toast(err.message); }
+};
+
+// ------------------------------------------------------------ boot
+(async () => {
+  const q = new URLSearchParams(location.search);
+  await refresh();
+  if (q.get('connected')) { toast(`${q.get('connected')} connected`); history.replaceState(null, '', '/'); openSettings(); }
+  else if (q.get('chat')) openChat(q.get('chat'));
+  else renderMessages([]);
+})();
+</script>
+</body>
+</html>
