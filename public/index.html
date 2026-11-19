@@ -60,6 +60,9 @@ details.think div{border-left:2px solid var(--line);padding:2px 0 2px 10px;margi
 .chip.on{border-color:var(--accent);color:var(--accent)}
 .box{display:flex;gap:8px;align-items:flex-end;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:8px}
 .box textarea{flex:1;border:0;resize:none;max-height:240px;outline:none;background:transparent;padding:6px}
+#mic.rec{background:var(--err);border-color:var(--err);color:#fff;animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.6}}
+@media (prefers-reduced-motion:reduce){#mic.rec{animation:none}}
 .empty{color:var(--muted);text-align:center;margin-top:20vh}
 dialog{border:1px solid var(--line);border-radius:14px;background:var(--bg);color:var(--text);width:min(760px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:0}
 dialog::backdrop{background:#0006}
@@ -93,6 +96,7 @@ form.add input{flex:1 1 140px}
     <div id="chips"></div>
     <div class="box">
       <textarea id="input" rows="1" placeholder="Message… use @alias to pick a model"></textarea>
+      <button id="mic" class="ghost" title="Voice input" aria-label="Voice input" hidden>🎤</button>
       <button class="primary" id="send">Send</button>
     </div>
   </div></div>
@@ -153,6 +157,7 @@ let busy = false;
 async function refresh() {
   state = await api('/api/state');
   renderChats(); renderChips(); renderSettings();
+  $('#mic').hidden = !window.MediaRecorder || !state.providers.some((p) => p.kind === 'gemini');
 }
 
 // ------------------------------------------------------------ sidebar
@@ -346,6 +351,47 @@ function autosize() { const t = $('#input'); t.style.height = 'auto'; t.style.he
 $('#input').addEventListener('input', autosize);
 $('#input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 $('#send').onclick = send;
+
+// ------------------------------------------------------------ voice input
+// Records with MediaRecorder, transcribes with the first Gemini key, and drops the text into the box to edit or send.
+let recorder = null;
+async function toggleMic() {
+  const mic = $('#mic');
+  if (recorder) { recorder.stop(); return; }
+  let media;
+  try { media = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { toast('Microphone access was blocked.'); return; }
+  // Gemini reads ogg and mp4/aac natively; Chrome only records webm, which it also accepts.
+  const mimeType = ['audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((t) => MediaRecorder.isTypeSupported(t));
+  const rec = new MediaRecorder(media, mimeType ? { mimeType } : {});
+  const parts = [];
+  rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
+  rec.onstop = async () => {
+    media.getTracks().forEach((t) => t.stop());
+    recorder = null;
+    mic.classList.remove('rec'); mic.textContent = '…'; mic.disabled = true; mic.title = 'Transcribing';
+    try {
+      const blob = new Blob(parts, { type: rec.mimeType || mimeType || 'audio/webm' });
+      if (blob.size > 15_000_000) throw new Error('Recording is too long to transcribe (over 15 MB).');
+      const audio = await new Promise((ok, fail) => {
+        const r = new FileReader();
+        r.onload = () => ok(String(r.result).split(',')[1] || '');
+        r.onerror = () => fail(r.error);
+        r.readAsDataURL(blob);
+      });
+      const { text } = await api('/api/transcribe', { method: 'POST', body: { audio, mime: blob.type.split(';')[0] } });
+      if (!text) { toast('No speech heard.'); return; }
+      const input = $('#input');
+      input.value = input.value.trim() ? `${input.value.trimEnd()} ${text}` : text;
+      autosize(); input.focus();
+    } catch (e) { toast(e.message); }
+    finally { mic.textContent = '🎤'; mic.disabled = false; mic.title = 'Voice input'; }
+  };
+  rec.start();
+  recorder = rec;
+  mic.classList.add('rec'); mic.textContent = '■'; mic.title = 'Stop recording';
+}
+$('#mic').onclick = toggleMic;
 $('#new').onclick = () => { current = null; history.replaceState(null, '', '/'); renderMessages([]); renderChats(); $('#input').focus(); $('#side').classList.remove('open'); };
 $('#menu').onclick = () => $('#side').classList.toggle('open');
 

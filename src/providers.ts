@@ -271,3 +271,23 @@ export async function listModels(kind: Kind, apiKey: string): Promise<string[]> 
   }
   return ids.sort();
 }
+
+/** Speech to text with a Gemini key. `audio` is base64. */
+export async function transcribe(apiKey: string, mime: string, audio: string): Promise<string> {
+  const r = await new GoogleGenAI({ apiKey }).models.generateContent({
+    // ponytail: Google's rolling alias for the current Flash model; pin an id if it regresses.
+    model: 'gemini-flash-latest',
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: mime, data: audio } },
+          {
+            text: 'Transcribe this audio verbatim, in the language spoken. Reply with only the transcript: no preamble, labels, timestamps or quotes. If there is no speech, reply with nothing.',
+          },
+        ],
+      },
+    ],
+  });
+  return (r.text ?? '').trim();
+}
