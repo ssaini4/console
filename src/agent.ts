@@ -32,6 +32,8 @@ const IMAGE_TOOL: ToolSpec = {
   },
 };
 const IMAGE_KINDS: Kind[] = ['openai', 'gemini'];
+/** Object key in the shared bucket; `console/` keeps this app's objects apart. */
+export const imageKey = (chatId: string, file: string) => `console/images/${chatId}/${file}`;
 export const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const MENTION = /(?:^|\s)@([a-z0-9_-]{1,32})\b/g;
 
@@ -69,9 +71,9 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager, store: BlobStor
       if (!prompt) throw new Error('prompt is required.');
       const img = await generateImage(p.kind, box.open(p.api_key_enc), prompt);
       // ponytail: objects outlive deleted chats; add a bucket delete if storage cost matters.
-      const name = `images/${chatId}/${crypto.randomUUID()}.${IMAGE_EXT[img.mime] ?? 'png'}`;
-      await store.put(name, img.data, img.mime);
-      return { id: c.id, name: c.name, content: 'The image was created and is now shown to the user.', image: `/api/${name}` };
+      const file = `${crypto.randomUUID()}.${IMAGE_EXT[img.mime] ?? 'png'}`;
+      await store.put(imageKey(chatId, file), img.data, img.mime);
+      return { id: c.id, name: c.name, content: 'The image was created and is now shown to the user.', image: `/api/images/${chatId}/${file}` };
     } catch (e) {
       return { id: c.id, name: c.name, content: (e as Error).message, isError: true };
     }

@@ -13,7 +13,7 @@ import { Hono, type MiddlewareHandler } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { bucketStore } from '@micro-cloud/sdk/storage';
-import { agent, type Decision, type Event, IMAGE_EXT } from './agent';
+import { agent, type Decision, type Event, IMAGE_EXT, imageKey } from './agent';
 import { secretBox } from './crypto';
 import { type McpRow, mcpManager } from './mcp';
 import { DEFAULT_MODEL, type Kind, listModels } from './providers';
@@ -21,14 +21,16 @@ import { DEFAULT_MODEL, type Kind, listModels } from './providers';
 const cfg = loadConfig({
   MASTER_KEY: z.string().regex(/^[0-9a-f]{64}$/, 'MASTER_KEY must be 64 hex characters'),
   OWNER_EMAIL: z.string().optional(),
+  // The shared platform-common bucket (micro-cloud infra/platform), set with set_env.
+  STORAGE_BUCKET: z.string().optional(),
 });
 const log = createLogger({ level: cfg.LOG_LEVEL, base: { service: cfg.APP_NAME } });
 if (!cfg.DATABASE_URL) throw new Error('DATABASE_URL is not set');
 const sql = createSql(cfg.DATABASE_URL);
 const box = secretBox(cfg.MASTER_KEY);
 const mcp = mcpManager(sql, box, cfg.PUBLIC_URL);
-const store = bucketStore(cfg.BUCKET);
-if (!cfg.BUCKET) log.warn('BUCKET is not set: generated images are kept in memory only');
+const store = bucketStore(cfg.STORAGE_BUCKET);
+if (!cfg.STORAGE_BUCKET) log.warn('STORAGE_BUCKET is not set: generated images are kept in memory only');
 const chat = agent(sql, box, mcp, store);
 const issuer = cfg.AUTH_ISSUER ?? 'http://localhost:8090';
 const resource = cfg.AUTH_AUDIENCE ?? `${cfg.PUBLIC_URL}/mcp`;
@@ -248,7 +250,7 @@ app.get('/api/chats/:id', async (c) => {
 
 app.get('/api/images/:chat/:file{[0-9a-f-]+\\.(png|jpg|webp)}', async (c) => {
   const file = c.req.param('file');
-  const data = await store.getBytes(`images/${c.req.param('chat')}/${file}`);
+  const data = await store.getBytes(imageKey(c.req.param('chat'), file));
   if (!data) return c.notFound();
   const mime = Object.keys(IMAGE_EXT).find((m) => file.endsWith(`.${IMAGE_EXT[m]}`)) ?? 'image/png';
   return c.body(new Uint8Array(data), 200, { 'content-type': mime, 'cache-control': 'private, max-age=31536000, immutable' });
