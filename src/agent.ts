@@ -1,12 +1,14 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { Sql } from 'postgres';
+import type { BlobStore } from '@micro-cloud/sdk/storage';
 import type { SecretBox } from './crypto';
 import type { McpManager, Tool } from './mcp';
-import { type Call, type Kind, type Msg, type Result, steps } from './providers';
+import { type Call, generateImage, type Kind, type Msg, type Result, steps, type ToolSpec } from './providers';
 
 export type Event =
   | { type: 'start'; alias: string; model: string }
   | { type: 'text'; delta: string }
+  | { type: 'thinking'; delta: string }
   | { type: 'calls'; calls: Call[] }
   | { type: 'results'; results: Result[] }
   | { type: 'confirm'; calls: (Call & { server: string; tool: string })[] }
@@ -20,6 +22,17 @@ type ProviderRow = { id: string; alias: string; kind: Kind; model: string; api_k
 type Row = Msg & { id: string };
 
 const MAX_STEPS = 25;
+const IMAGE_TOOL: ToolSpec = {
+  name: 'generate_image',
+  description: 'Create an image from a detailed text description. The image is shown to the user in the chat.',
+  schema: {
+    type: 'object',
+    properties: { prompt: { type: 'string', description: 'What the image should show: subject, style, composition.' } },
+    required: ['prompt'],
+  },
+};
+const IMAGE_KINDS: Kind[] = ['openai', 'gemini'];
+export const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const MENTION = /(?:^|\s)@([a-z0-9_-]{1,32})\b/g;
 
 function system(alias: string, model: string) {
@@ -30,7 +43,7 @@ tool call is shown to the user, who approves or denies it. If a call is denied, 
 ask what they want instead. Answer in Markdown.`;
 }
 
-export function agent(sql: Sql, box: SecretBox, mcp: McpManager) {
+export function agent(sql: Sql, box: SecretBox, mcp: McpManager, store: BlobStore) {
   const providers = () => sql<ProviderRow[]>`select * from providers order by id`;
   const history = (chatId: string) =>
     sql<Row[]>`select id, role, alias, kind, text, tool_calls, tool_results, raw
@@ -47,7 +60,25 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager) {
               values (${chatId}, 'tool', ${from.alias}, ${from.kind}, ${sql.json(results)})`;
   }
 
-  async function call(t: Tool | undefined, clients: Map<string, Client>, c: Call): Promise<Result> {
+  /** Built-in: runs on the first provider whose key can make images, whatever model asked. */
+  async function image(chatId: string, c: Call): Promise<Result> {
+    try {
+      const p = (await providers()).find((x) => IMAGE_KINDS.includes(x.kind));
+      if (!p) throw new Error('Add an OpenAI or Gemini provider to generate images.');
+      const prompt = String(c.args.prompt ?? '').trim();
+      if (!prompt) throw new Error('prompt is required.');
+      const img = await generateImage(p.kind, box.open(p.api_key_enc), prompt);
+      // ponytail: objects outlive deleted chats; add a bucket delete if storage cost matters.
+      const name = `images/${chatId}/${crypto.randomUUID()}.${IMAGE_EXT[img.mime] ?? 'png'}`;
+      await store.put(name, img.data, img.mime);
+      return { id: c.id, name: c.name, content: 'The image was created and is now shown to the user.', image: `/api/${name}` };
+    } catch (e) {
+      return { id: c.id, name: c.name, content: (e as Error).message, isError: true };
+    }
+  }
+
+  async function call(chatId: string, t: Tool | undefined, clients: Map<string, Client>, c: Call): Promise<Result> {
+    if (c.name === IMAGE_TOOL.name) return image(chatId, c);
     const client = t && clients.get(t.server.id);
     if (!t || !client) return { id: c.id, name: c.name, content: `Tool ${c.name} is not available.`, isError: true };
     try {
@@ -64,6 +95,8 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager) {
   async function loop(chatId: string, p: ProviderRow, emit: Emit) {
     const { tools, clients, errors } = await mcp.tools();
     for (const e of errors) emit({ type: 'note', text: `MCP ${e}` });
+    const canImage = (await providers()).some((x) => IMAGE_KINDS.includes(x.kind));
+    const specs: ToolSpec[] = canImage ? [IMAGE_TOOL, ...tools] : tools;
     try {
       for (let i = 0; i < MAX_STEPS; i++) {
         emit({ type: 'start', alias: p.alias, model: p.model });
@@ -72,8 +105,9 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager) {
           model: p.model,
           system: system(p.alias, p.model),
           history: await history(chatId),
-          tools,
+          tools: specs,
           onText: (delta) => emit({ type: 'text', delta }),
+          onThinking: (delta) => emit({ type: 'thinking', delta }),
         });
         const [row] = await sql<Row[]>`
           insert into messages (chat_id, role, alias, kind, model, text, tool_calls, raw)
@@ -100,7 +134,7 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager) {
           });
           return;
         }
-        const results = await Promise.all(out.calls.map((c) => call(byName.get(c.name), clients, c)));
+        const results = await Promise.all(out.calls.map((c) => call(chatId, byName.get(c.name), clients, c)));
         await addTool(chatId, row, results);
         emit({ type: 'results', results });
       }
@@ -154,13 +188,14 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager) {
           const results = await Promise.all(
             open.tool_calls.map(async (c) => {
               const t = byName.get(c.name);
-              const d = t?.server.always_allow.includes(t.tool) ? 'allow' : (decisions[c.id] ?? 'deny');
+              const auto = c.name === IMAGE_TOOL.name || t?.server.always_allow.includes(t.tool);
+              const d = auto ? 'allow' : (decisions[c.id] ?? 'deny');
               if (d === 'deny') return { id: c.id, name: c.name, content: 'The user denied this tool call.', isError: true };
               if (d === 'always' && t) {
                 await sql`update mcp_servers set always_allow = array_append(always_allow, ${t.tool})
                           where id = ${t.server.id} and not (${t.tool} = any(always_allow))`;
               }
-              return call(t, clients, c);
+              return call(chatId, t, clients, c);
             }),
           );
           await addTool(chatId, open, results);

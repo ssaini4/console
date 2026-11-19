@@ -12,7 +12,8 @@ import { webAuth } from '@micro-cloud/sdk/web-auth';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import { agent, type Decision, type Event } from './agent';
+import { bucketStore } from '@micro-cloud/sdk/storage';
+import { agent, type Decision, type Event, IMAGE_EXT } from './agent';
 import { secretBox } from './crypto';
 import { type McpRow, mcpManager } from './mcp';
 import { DEFAULT_MODEL, type Kind, listModels } from './providers';
@@ -26,7 +27,9 @@ if (!cfg.DATABASE_URL) throw new Error('DATABASE_URL is not set');
 const sql = createSql(cfg.DATABASE_URL);
 const box = secretBox(cfg.MASTER_KEY);
 const mcp = mcpManager(sql, box, cfg.PUBLIC_URL);
-const chat = agent(sql, box, mcp);
+const store = bucketStore(cfg.BUCKET);
+if (!cfg.BUCKET) log.warn('BUCKET is not set: generated images are kept in memory only');
+const chat = agent(sql, box, mcp, store);
 const issuer = cfg.AUTH_ISSUER ?? 'http://localhost:8090';
 const resource = cfg.AUTH_AUDIENCE ?? `${cfg.PUBLIC_URL}/mcp`;
 const owner = cfg.DEV_AUTH ? cfg.DEV_USER : cfg.OWNER_EMAIL?.toLowerCase();
@@ -231,9 +234,24 @@ app.post('/api/chats', async (c) => {
 
 app.get('/api/chats/:id', async (c) => {
   const messages = await sql`
-    select id, role, alias, model, text, tool_calls, tool_results from messages
+    select id, role, alias, model, text, tool_calls, tool_results, raw from messages
     where chat_id = ${c.req.param('id')} order by id`;
-  return c.json({ messages });
+  // Thinking lives in the provider's raw blocks (Anthropic `thinking`, Gemini `thought` parts).
+  type Block = { type?: string; thinking?: string; thought?: boolean; text?: string };
+  const thinking = (raw: unknown) =>
+    (Array.isArray(raw) ? (raw as Block[]) : [])
+      .map((b) => (b.type === 'thinking' ? b.thinking : b.thought ? b.text : '') ?? '')
+      .filter(Boolean)
+      .join('\n\n');
+  return c.json({ messages: messages.map(({ raw, ...m }) => ({ ...m, thinking: thinking(raw) })) });
+});
+
+app.get('/api/images/:chat/:file{[0-9a-f-]+\\.(png|jpg|webp)}', async (c) => {
+  const file = c.req.param('file');
+  const data = await store.getBytes(`images/${c.req.param('chat')}/${file}`);
+  if (!data) return c.notFound();
+  const mime = Object.keys(IMAGE_EXT).find((m) => file.endsWith(`.${IMAGE_EXT[m]}`)) ?? 'image/png';
+  return c.body(new Uint8Array(data), 200, { 'content-type': mime, 'cache-control': 'private, max-age=31536000, immutable' });
 });
 
 app.delete('/api/chats/:id', async (c) => {

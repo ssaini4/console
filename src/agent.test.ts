@@ -3,6 +3,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import { createSql, migrate } from '@micro-cloud/sdk/db';
+import { memoryStore } from '@micro-cloud/sdk/storage';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
@@ -66,7 +67,7 @@ afterAll(async () => {
 });
 
 t('tool calls wait for approval, run once allowed, and other models see the chat', async () => {
-  const a = agent(sql, box, mcpManager(sql, box, 'http://localhost'));
+  const a = agent(sql, box, mcpManager(sql, box, 'http://localhost'), memoryStore());
   const [chat] = await sql<{ id: string }[]>`insert into chats default values returning id`;
   const id = chat!.id;
 

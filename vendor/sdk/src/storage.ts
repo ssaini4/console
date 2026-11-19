@@ -5,6 +5,8 @@
 export type BlobStore = {
   put(name: string, body: string | Uint8Array, contentType?: string): Promise<void>;
   get(name: string): Promise<string | null>;
+  /** Raw bytes, for binary objects such as images. */
+  getBytes(name: string): Promise<Uint8Array | null>;
   list(prefix?: string): Promise<string[]>;
 };
 
@@ -40,12 +42,16 @@ export function bucketStore(
       if (!r.ok) throw new Error(`put ${name}: ${r.status} ${await r.text()}`);
     },
     async get(name) {
+      const b = await this.getBytes(name);
+      return b && new TextDecoder().decode(b);
+    },
+    async getBytes(name) {
       const r = await fetchImpl(`${api}/${encodeURIComponent(name)}?alt=media`, {
         headers: await auth(),
       });
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(`get ${name}: ${r.status}`);
-      return r.text();
+      return new Uint8Array(await r.arrayBuffer());
     },
     async list(prefix = '') {
       const r = await fetchImpl(`${api}?prefix=${encodeURIComponent(prefix)}`, {
@@ -58,12 +64,16 @@ export function bucketStore(
 }
 
 export function memoryStore(): BlobStore {
-  const m = new Map<string, string>();
+  const m = new Map<string, Uint8Array>();
   return {
     async put(name, body) {
-      m.set(name, typeof body === 'string' ? body : new TextDecoder().decode(body));
+      m.set(name, typeof body === 'string' ? new TextEncoder().encode(body) : new Uint8Array(body));
     },
     async get(name) {
+      const b = m.get(name);
+      return b ? new TextDecoder().decode(b) : null;
+    },
+    async getBytes(name) {
       return m.get(name) ?? null;
     },
     async list(prefix = '') {
