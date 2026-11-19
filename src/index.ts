@@ -16,7 +16,7 @@ import { bucketStore } from '@micro-cloud/sdk/storage';
 import { agent, type Decision, type Event, IMAGE_EXT, imageKey } from './agent';
 import { secretBox } from './crypto';
 import { type McpRow, mcpManager } from './mcp';
-import { DEFAULT_MODEL, type Kind, listModels } from './providers';
+import { DEFAULT_MODEL, type Kind, listModels, transcribe } from './providers';
 
 const cfg = loadConfig({
   MASTER_KEY: z.string().regex(/^[0-9a-f]{64}$/, 'MASTER_KEY must be 64 hex characters'),
@@ -272,6 +272,24 @@ app.post('/api/chats/:id/send', async (c) => {
   const b = z.object({ text: z.string().min(1).max(100_000) }).safeParse(await c.req.json());
   if (!b.success) return c.json({ error: 'text required' }, 400);
   return sse(c, (emit) => chat.send(c.req.param('id'), b.data.text, emit));
+});
+
+// ~15 MB of audio as base64; Gemini caps inline request data at 20 MB.
+app.post('/api/transcribe', async (c) => {
+  try {
+    const b = z
+      .object({
+        audio: z.base64().max(20_000_000),
+        mime: z.string().regex(/^audio\/[a-z0-9.+-]+$/, 'mime must be audio/*'),
+      })
+      .parse(await c.req.json());
+    const [p] = await sql<{ api_key_enc: string }[]>`
+      select api_key_enc from providers where kind = 'gemini' order by id limit 1`;
+    if (!p) return c.json({ error: 'Add a Gemini provider in Settings to use voice input.' }, 400);
+    return c.json({ text: await transcribe(box.open(p.api_key_enc), b.mime, b.audio) });
+  } catch (e) {
+    return bad(c, e);
+  }
 });
 
 app.post('/api/chats/:id/resume', async (c) => {
