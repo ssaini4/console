@@ -13,7 +13,7 @@ import { Hono, type MiddlewareHandler } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { bucketStore } from '@micro-cloud/sdk/storage';
-import { agent, type Decision, type Event, IMAGE_EXT, imageKey } from './agent';
+import { agent, type Attachment, type Decision, type Event, fileKey, IMAGE_EXT, imageKey } from './agent';
 import { secretBox } from './crypto';
 import { type McpRow, mcpManager } from './mcp';
 import { DEFAULT_MODEL, type Kind, listModels, transcribe } from './providers';
@@ -236,7 +236,7 @@ app.post('/api/chats', async (c) => {
 
 app.get('/api/chats/:id', async (c) => {
   const messages = await sql`
-    select id, role, alias, model, text, tool_calls, tool_results, raw from messages
+    select id, role, alias, model, text, tool_calls, tool_results, raw, attachments from messages
     where chat_id = ${c.req.param('id')} order by id`;
   // Thinking lives in the provider's raw blocks (Anthropic `thinking`, Gemini `thought` parts).
   type Block = { type?: string; thinking?: string; thought?: boolean; text?: string };
@@ -256,6 +256,24 @@ app.get('/api/images/:chat/:file{[0-9a-f-]+\\.(png|jpg|webp)}', async (c) => {
   return c.body(new Uint8Array(data), 200, { 'content-type': mime, 'cache-control': 'private, max-age=31536000, immutable' });
 });
 
+/** An attached file. Sandboxed and never sniffed, so an uploaded HTML or SVG file can't run here. */
+app.get('/api/files/:chat/:id{[0-9a-f-]{36}}', async (c) => {
+  const { chat, id } = c.req.param();
+  const [a] = await sql<{ a: Attachment }[]>`
+    select a from messages, jsonb_array_elements(attachments) a
+    where chat_id = ${chat} and a->>'id' = ${id} limit 1`;
+  const data = a && (await store.getBytes(fileKey(chat, id)));
+  if (!a || !data) return c.notFound();
+  const inline = /^(image\/(png|jpeg|gif|webp)|application\/pdf|audio\/|video\/|text\/plain)/.test(a.a.mime);
+  return c.body(new Uint8Array(data), 200, {
+    'content-type': a.a.mime || 'application/octet-stream',
+    'content-disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(a.a.name)}`,
+    'content-security-policy': 'sandbox',
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'private, max-age=31536000, immutable',
+  });
+});
+
 app.delete('/api/chats/:id', async (c) => {
   await sql`delete from chats where id = ${c.req.param('id')}`;
   return c.json({ ok: true });
@@ -268,10 +286,18 @@ const sse = (c: Parameters<typeof streamSSE>[0], run: (emit: (e: Event) => void)
     await Promise.all(queue);
   });
 
+// Attachments ride along as base64: up to 10 files, 15 MB together (Gemini's inline request limit is 20 MB).
+const MAX_UPLOAD = 15_000_000;
+const Upload = z.object({ name: z.string().min(1).max(255), mime: z.string().max(200), data: z.base64() });
 app.post('/api/chats/:id/send', async (c) => {
-  const b = z.object({ text: z.string().min(1).max(100_000) }).safeParse(await c.req.json());
-  if (!b.success) return c.json({ error: 'text required' }, 400);
-  return sse(c, (emit) => chat.send(c.req.param('id'), b.data.text, emit));
+  const b = z
+    .object({ text: z.string().max(100_000), files: z.array(Upload).max(10).default([]) })
+    .refine((x) => x.text.trim() || x.files.length, 'text or files required')
+    .safeParse(await c.req.json());
+  if (!b.success) return c.json({ error: z.prettifyError(b.error) }, 400);
+  const files = b.data.files.map((f) => ({ name: f.name, mime: f.mime.split(';')[0]!.trim().toLowerCase(), data: Buffer.from(f.data, 'base64') }));
+  if (files.reduce((n, f) => n + f.data.length, 0) > MAX_UPLOAD) return c.json({ error: 'Attachments are over 15 MB in total.' }, 400);
+  return sse(c, (emit) => chat.send(c.req.param('id'), b.data.text, emit, files));
 });
 
 // ~15 MB of audio as base64; Gemini caps inline request data at 20 MB.

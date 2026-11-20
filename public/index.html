@@ -60,6 +60,12 @@ details.think div{border-left:2px solid var(--line);padding:2px 0 2px 10px;margi
 .chip.on{border-color:var(--accent);color:var(--accent)}
 .box{display:flex;gap:8px;align-items:flex-end;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:8px}
 .box textarea{flex:1;border:0;resize:none;max-height:240px;outline:none;background:transparent;padding:6px}
+#attached{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}#attached:empty{display:none}
+.file{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--card);border-radius:8px;padding:3px 8px;font-size:13px;max-width:100%;color:inherit;text-decoration:none}
+.file span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.file small{color:var(--muted)}.file button{border:0;padding:0 2px;background:none}
+.files{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:6px}
+.box.drop{border-color:var(--accent);border-style:dashed}
 #mic.rec{background:var(--err);border-color:var(--err);color:#fff;animation:pulse 1.2s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.6}}
 @media (prefers-reduced-motion:reduce){#mic.rec{animation:none}}
@@ -94,7 +100,10 @@ form.add input{flex:1 1 140px}
   <div id="log"><div class="inner" id="msgs"></div></div>
   <div id="composer"><div class="inner">
     <div id="chips"></div>
-    <div class="box">
+    <div id="attached"></div>
+    <div class="box" id="box">
+      <input type="file" id="file" multiple hidden />
+      <button id="attach" class="ghost" title="Attach files" aria-label="Attach files">📎</button>
       <textarea id="input" rows="1" placeholder="Message… use @alias to pick a model"></textarea>
       <button id="mic" class="ghost" title="Voice input" aria-label="Voice input" hidden>🎤</button>
       <button class="primary" id="send">Send</button>
@@ -210,13 +219,25 @@ function assistantNode(alias, model) {
   return { node, body, tools, think, thinkText, setStatus };
 }
 
+const size = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+const fileChip = (f, onRemove) => {
+  const kids = [el('span', { textContent: `📄 ${f.name}` }), el('small', { textContent: size(f.size) })];
+  if (onRemove) { const x = el('button', { textContent: '✕', title: 'Remove' }); x.onclick = onRemove; kids.push(x); }
+  return f.href ? el('a', { className: 'file', href: f.href, target: '_blank', rel: 'noopener', title: f.name }, ...kids) : el('div', { className: 'file', title: f.name }, ...kids);
+};
+function userNode(text, files = []) {
+  return el('div', { className: 'msg user' },
+    files.length ? el('div', { className: 'files' }, ...files.map((f) => fileChip(f))) : null,
+    text ? el('div', { className: 'bubble', textContent: text }) : null);
+}
+
 function renderMessages(messages) {
   const box = $('#msgs'); box.replaceChildren();
   if (!messages.length) { box.append(el('div', { className: 'empty', textContent: state.providers.length ? 'Start a conversation. Type @ to pick a model.' : 'Add a model provider in Settings to begin.' })); return; }
   const results = new Map();
   for (const m of messages) if (m.role === 'tool') for (const r of m.tool_results) results.set(r.id, r);
   for (const m of messages) {
-    if (m.role === 'user') box.append(el('div', { className: 'msg user' }, el('div', { className: 'bubble', textContent: m.text })));
+    if (m.role === 'user') box.append(userNode(m.text, (m.attachments || []).map((a) => ({ ...a, href: `/api/files/${current}/${a.id}` }))));
     else if (m.role === 'assistant') {
       const a = assistantNode(m.alias, m.model);
       if (m.thinking) { a.think.hidden = false; a.thinkText.textContent = m.thinking; }
@@ -323,18 +344,23 @@ async function stream(path, body) {
 async function send() {
   const input = $('#input');
   let text = input.value.trim();
-  if (!text || busy) return;
+  if ((!text && !attached.length) || busy) return;
   if (!state.providers.length) { openSettings(); return; }
-  if (selected && !/(^|\s)@[a-z0-9_-]+/.test(text)) text = `@${selected} ${text}`;
+  if (selected && !/(^|\s)@[a-z0-9_-]+/.test(text)) text = `@${selected} ${text}`.trim();
+  const files = attached; attached = []; renderAttached();
+  let payload;
+  try {
+    payload = await Promise.all(files.map(async (f) => ({ name: f.name, mime: f.type, data: await base64(f) })));
+  } catch (e) { attached = files; renderAttached(); toast(`Could not read a file: ${e.message}`); return; }
   if (!current) { const c = await api('/api/chats', { method: 'POST', body: {} }); current = c.id; history.replaceState(null, '', `/?chat=${c.id}`); $('#msgs').replaceChildren(); }
   input.value = ''; autosize();
   $('#msgs').querySelector('.empty')?.remove();
   $('#msgs').querySelectorAll('.confirm').forEach((c) => c.remove());
-  $('#msgs').append(el('div', { className: 'msg user' }, el('div', { className: 'bubble', textContent: text })));
+  $('#msgs').append(userNode(text, files));
   const m = text.match(/(?:^|\s)@([a-z0-9_-]+)/);
   if (m && state.providers.some((p) => p.alias === m[1])) { selected = m[1]; renderChips(); }
   scrollDown();
-  await stream(`/api/chats/${current}/send`, { text });
+  await stream(`/api/chats/${current}/send`, { text, files: payload });
 }
 
 function renderChips() {
@@ -351,6 +377,36 @@ function autosize() { const t = $('#input'); t.style.height = 'auto'; t.style.he
 $('#input').addEventListener('input', autosize);
 $('#input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 $('#send').onclick = send;
+
+// ------------------------------------------------------------ attachments
+// Sent with the message as base64. Images and PDFs go to the model natively, text and code files as text.
+const MAX_UPLOAD = 15_000_000;
+let attached = [];
+const base64 = (blob) => new Promise((ok, fail) => {
+  const r = new FileReader();
+  r.onload = () => ok(String(r.result).split(',')[1] || '');
+  r.onerror = () => fail(r.error);
+  r.readAsDataURL(blob);
+});
+function renderAttached() {
+  $('#attached').replaceChildren(...attached.map((f, i) => fileChip(f, () => { attached.splice(i, 1); renderAttached(); })));
+}
+function attach(list) {
+  const next = [...attached, ...list];
+  if (next.length > 10) return toast('Up to 10 files per message.');
+  if (next.reduce((n, f) => n + f.size, 0) > MAX_UPLOAD) return toast('Attachments are limited to 15 MB in total.');
+  attached = next; renderAttached(); $('#input').focus();
+}
+$('#attach').onclick = () => $('#file').click();
+$('#file').onchange = (e) => { attach([...e.target.files]); e.target.value = ''; };
+$('#input').addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); attach(files); }
+});
+const dropBox = $('#box');
+dropBox.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); dropBox.classList.add('drop'); } });
+dropBox.addEventListener('dragleave', () => dropBox.classList.remove('drop'));
+dropBox.addEventListener('drop', (e) => { e.preventDefault(); dropBox.classList.remove('drop'); attach([...(e.dataTransfer?.files || [])]); });
 
 // ------------------------------------------------------------ voice input
 // Records with MediaRecorder, transcribes with the first Gemini key, and drops the text into the box to edit or send.

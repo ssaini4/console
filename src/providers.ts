@@ -7,6 +7,8 @@ export type Call = { id: string; name: string; args: Record<string, unknown> };
 export type Result = { id: string; name: string; content: string; isError?: boolean; image?: string };
 /** What a model sees of a tool. */
 export type ToolSpec = { name: string; description: string; schema: Record<string, unknown> };
+/** A file the user attached, with its bytes loaded. */
+export type FileData = { name: string; mime: string; data: Uint8Array };
 export type Msg = {
   role: 'user' | 'assistant' | 'tool';
   alias: string | null;
@@ -15,6 +17,8 @@ export type Msg = {
   tool_calls: Call[];
   tool_results: Result[];
   raw: unknown;
+  /** User messages only: attached files. */
+  files?: FileData[];
 };
 export type StepIn = {
   apiKey: string;
@@ -43,6 +47,46 @@ function foreign(m: Msg): string {
 }
 const native = (m: Msg, kind: Kind) => m.role !== 'user' && m.kind === kind;
 
+// ---------------------------------------------------------------- attachments
+
+const IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const MAX_TEXT = 200_000;
+/** How a provider can take a file: as an image, a PDF, other media (Gemini only), or decoded text. */
+export type Piece =
+  | { kind: 'text'; text: string }
+  | { kind: 'image' | 'pdf' | 'media'; file: FileData; b64: string };
+
+function asText(f: FileData): string | null {
+  try {
+    const t = new TextDecoder('utf-8', { fatal: true }).decode(f.data);
+    return t.includes('\0') ? null : t;
+  } catch {
+    return null;
+  }
+}
+
+/** A user message's files as provider-neutral pieces, followed by its text. */
+export function pieces(m: Msg): Piece[] {
+  const out: Piece[] = [];
+  for (const f of m.files ?? []) {
+    const b64 = () => Buffer.from(f.data).toString('base64');
+    if (IMAGE_MIMES.includes(f.mime)) out.push({ kind: 'image', file: f, b64: b64() });
+    else if (f.mime === 'application/pdf') out.push({ kind: 'pdf', file: f, b64: b64() });
+    else if (/^(audio|video)\//.test(f.mime)) out.push({ kind: 'media', file: f, b64: b64() });
+    else {
+      const t = asText(f);
+      const body = t === null
+        ? `(${f.mime || 'binary'} file, ${f.data.length} bytes: its contents can't be read as text)`
+        : t.length > MAX_TEXT ? `${t.slice(0, MAX_TEXT)}\n… (truncated)` : t;
+      out.push({ kind: 'text', text: `<file name="${f.name.replace(/"/g, "'")}">\n${body}\n</file>` });
+    }
+  }
+  if (m.text) out.push({ kind: 'text', text: m.text });
+  return out;
+}
+const unreadable = (p: Piece & { file: FileData }) =>
+  `(attached ${p.file.name}, ${p.file.mime}: this model can't read that file type)`;
+
 // ---------------------------------------------------------------- Anthropic
 
 // Models that accept server-side refusal fallbacks.
@@ -53,6 +97,16 @@ const ADAPTIVE = /^claude-(fable|mythos|opus-5|opus-4-[678]|sonnet-5|sonnet-4-6|
 async function anthropicStep(p: StepIn): Promise<StepOut> {
   const client = new Anthropic({ apiKey: p.apiKey });
   const messages: Anthropic.Beta.BetaMessageParam[] = p.history.map((m) => {
+    if (m.role === 'user' && m.files?.length) {
+      const content: Anthropic.Beta.BetaContentBlockParam[] = pieces(m).map((x) =>
+        x.kind === 'image'
+          ? { type: 'image', source: { type: 'base64', media_type: x.file.mime as 'image/png', data: x.b64 } }
+          : x.kind === 'pdf'
+            ? { type: 'document', title: x.file.name, source: { type: 'base64', media_type: 'application/pdf', data: x.b64 } }
+            : { type: 'text', text: x.kind === 'text' ? x.text : unreadable(x) },
+      );
+      return { role: 'user', content };
+    }
     if (!native(m, 'anthropic')) {
       return { role: m.role === 'user' ? 'user' : m.role === 'assistant' ? 'assistant' : 'user', content: m.role === 'user' ? m.text : foreign(m) };
     }
@@ -109,7 +163,18 @@ async function openaiStep(p: StepIn): Promise<StepOut> {
   const client = new OpenAI({ apiKey: p.apiKey });
   const messages: OpenAI.ChatCompletionMessageParam[] = [{ role: 'system', content: p.system }];
   for (const m of p.history) {
-    if (!native(m, 'openai')) {
+    if (m.role === 'user' && m.files?.length) {
+      messages.push({
+        role: 'user',
+        content: pieces(m).map((x): OpenAI.ChatCompletionContentPart =>
+          x.kind === 'image'
+            ? { type: 'image_url', image_url: { url: `data:${x.file.mime};base64,${x.b64}` } }
+            : x.kind === 'pdf'
+              ? { type: 'file', file: { filename: x.file.name, file_data: `data:application/pdf;base64,${x.b64}` } }
+              : { type: 'text', text: x.kind === 'text' ? x.text : unreadable(x) },
+        ),
+      });
+    } else if (!native(m, 'openai')) {
       messages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.role === 'user' ? m.text : foreign(m) });
     } else if (m.role === 'assistant') {
       messages.push({
@@ -163,7 +228,12 @@ async function geminiStep(p: StepIn): Promise<StepOut> {
     else contents.push({ role, parts });
   };
   for (const m of p.history) {
-    if (!native(m, 'gemini')) push(m.role === 'assistant' ? 'model' : 'user', [{ text: m.role === 'user' ? m.text : foreign(m) }]);
+    if (m.role === 'user' && m.files?.length) {
+      push(
+        'user',
+        pieces(m).map((x) => (x.kind === 'text' ? { text: x.text } : { inlineData: { mimeType: x.file.mime, data: x.b64 } })),
+      );
+    } else if (!native(m, 'gemini')) push(m.role === 'assistant' ? 'model' : 'user', [{ text: m.role === 'user' ? m.text : foreign(m) }]);
     // Our own parts carry thought signatures that must be sent back as-is.
     else if (m.role === 'assistant') push('model', m.raw as Part[]);
     else {
@@ -234,7 +304,7 @@ export const steps: Record<Kind, (p: StepIn) => Promise<StepOut>> = {
 export async function generateImage(kind: Kind, apiKey: string, prompt: string): Promise<{ mime: string; data: Buffer }> {
   // ponytail: picks the alphabetically last matching model id (≈ newest); add a setting if that picks wrong.
   const pick = async (re: RegExp) => {
-    const model = (await listModels(kind, apiKey)).filter((m) => re.test(m)).at(-1);
+    const model = (await cachedModels(kind, apiKey)).filter((m) => re.test(m)).at(-1);
     if (!model) throw new Error(`No image model available for this ${kind} key.`);
     return model;
   };
@@ -272,11 +342,34 @@ export async function listModels(kind: Kind, apiKey: string): Promise<string[]> 
   return ids.sort();
 }
 
+const modelCache = new Map<string, { until: number; ids: Promise<string[]> }>();
+/** listModels, remembered for 10 minutes per key. */
+function cachedModels(kind: Kind, apiKey: string): Promise<string[]> {
+  const k = `${kind}:${apiKey}`;
+  const hit = modelCache.get(k);
+  if (hit && hit.until > Date.now()) return hit.ids;
+  const ids = listModels(kind, apiKey);
+  modelCache.set(k, { until: Date.now() + 10 * 60_000, ids });
+  ids.catch(() => modelCache.delete(k));
+  return ids;
+}
+
+/** The newest plain Gemini Flash model the key can use: highest version, stable before preview. */
+export function pickFlash(ids: string[]): string | undefined {
+  const flash = ids.flatMap((id) => {
+    const m = /^gemini-(\d+(?:\.\d+)?)-flash(-preview(?:-[\w-]+)?)?$/.exec(id);
+    return m ? [{ id, version: Number(m[1]), preview: Boolean(m[2]) }] : [];
+  });
+  flash.sort((a, b) => b.version - a.version || Number(a.preview) - Number(b.preview));
+  return flash[0]?.id;
+}
+
 /** Speech to text with a Gemini key. `audio` is base64. */
 export async function transcribe(apiKey: string, mime: string, audio: string): Promise<string> {
+  const model = pickFlash(await cachedModels('gemini', apiKey));
+  if (!model) throw new Error('This Gemini key has no Flash model for transcription.');
   const r = await new GoogleGenAI({ apiKey }).models.generateContent({
-    // ponytail: Google's rolling alias for the current Flash model; pin an id if it regresses.
-    model: 'gemini-flash-latest',
+    model,
     contents: [
       {
         role: 'user',

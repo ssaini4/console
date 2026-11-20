@@ -3,7 +3,7 @@ import type { Sql } from 'postgres';
 import type { BlobStore } from '@micro-cloud/sdk/storage';
 import type { SecretBox } from './crypto';
 import type { McpManager, Tool } from './mcp';
-import { type Call, generateImage, type Kind, type Msg, type Result, steps, type ToolSpec } from './providers';
+import { type Call, type FileData, generateImage, type Kind, type Msg, type Result, steps, type ToolSpec } from './providers';
 
 export type Event =
   | { type: 'start'; alias: string; model: string }
@@ -19,7 +19,8 @@ export type Emit = (e: Event) => void;
 export type Decision = 'allow' | 'always' | 'deny';
 
 type ProviderRow = { id: string; alias: string; kind: Kind; model: string; api_key_enc: string };
-type Row = Msg & { id: string };
+export type Attachment = { id: string; name: string; mime: string; size: number };
+type Row = Msg & { id: string; attachments: Attachment[] };
 
 const MAX_STEPS = 25;
 const IMAGE_TOOL: ToolSpec = {
@@ -34,6 +35,7 @@ const IMAGE_TOOL: ToolSpec = {
 const IMAGE_KINDS: Kind[] = ['openai', 'gemini'];
 /** Object key in the shared bucket; `console/` keeps this app's objects apart. */
 export const imageKey = (chatId: string, file: string) => `console/images/${chatId}/${file}`;
+export const fileKey = (chatId: string, id: string) => `console/files/${chatId}/${id}`;
 export const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const MENTION = /(?:^|\s)@([a-z0-9_-]{1,32})\b/g;
 
@@ -48,8 +50,21 @@ ask what they want instead. Answer in Markdown.`;
 export function agent(sql: Sql, box: SecretBox, mcp: McpManager, store: BlobStore) {
   const providers = () => sql<ProviderRow[]>`select * from providers order by id`;
   const history = (chatId: string) =>
-    sql<Row[]>`select id, role, alias, kind, text, tool_calls, tool_results, raw
+    sql<Row[]>`select id, role, alias, kind, text, tool_calls, tool_results, raw, attachments
                from messages where chat_id = ${chatId} order by id`;
+
+  /** History with attached files' bytes loaded; `cache` keeps them across one run's steps. */
+  async function withFiles(chatId: string, cache: Map<string, FileData>): Promise<Row[]> {
+    const rows = await history(chatId);
+    await Promise.all(
+      rows.flatMap((r) => r.attachments).filter((a) => !cache.has(a.id)).map(async (a) => {
+        const data = await store.getBytes(fileKey(chatId, a.id));
+        // A missing object becomes an empty text file rather than failing the whole chat.
+        cache.set(a.id, data ? { name: a.name, mime: a.mime, data } : { name: a.name, mime: 'text/plain', data: new TextEncoder().encode('(file no longer available)') });
+      }),
+    );
+    return rows.map((r) => (r.attachments.length ? { ...r, files: r.attachments.map((a) => cache.get(a.id) as FileData) } : r));
+  }
 
   /** The assistant turn whose tool calls still lack results, if any. */
   function pending(rows: Row[]): Row | null {
@@ -99,6 +114,7 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager, store: BlobStor
     for (const e of errors) emit({ type: 'note', text: `MCP ${e}` });
     const canImage = (await providers()).some((x) => IMAGE_KINDS.includes(x.kind));
     const specs: ToolSpec[] = canImage ? [IMAGE_TOOL, ...tools] : tools;
+    const files = new Map<string, FileData>();
     try {
       for (let i = 0; i < MAX_STEPS; i++) {
         emit({ type: 'start', alias: p.alias, model: p.model });
@@ -106,7 +122,7 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager, store: BlobStor
           apiKey: box.open(p.api_key_enc),
           model: p.model,
           system: system(p.alias, p.model),
-          history: await history(chatId),
+          history: await withFiles(chatId, files),
           tools: specs,
           onText: (delta) => emit({ type: 'text', delta }),
           onThinking: (delta) => emit({ type: 'thinking', delta }),
@@ -157,7 +173,7 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager, store: BlobStor
 
   return {
     /** A new user message. `@alias` picks the model; otherwise the chat's last one is used. */
-    send: (chatId: string, text: string, emit: Emit) =>
+    send: (chatId: string, text: string, emit: Emit, uploads: FileData[] = []) =>
       guard(emit, async () => {
         const all = await providers();
         if (!all.length) throw new Error('Add an API provider in Settings first.');
@@ -172,8 +188,18 @@ export function agent(sql: Sql, box: SecretBox, mcp: McpManager, store: BlobStor
             id: c.id, name: c.name, content: 'Not run: the user sent a new message instead.', isError: true,
           })));
         }
-        await sql`insert into messages (chat_id, role, alias, text) values (${chatId}, 'user', ${p.alias}, ${text})`;
-        if (!rows.length) await sql`update chats set title = ${text.replace(MENTION, ' ').trim().slice(0, 60) || 'New chat'} where id = ${chatId}`;
+        // ponytail: like images, file objects outlive deleted chats.
+        const attachments: Attachment[] = await Promise.all(
+          uploads.map(async (f) => {
+            const id = crypto.randomUUID();
+            await store.put(fileKey(chatId, id), f.data, f.mime || 'application/octet-stream');
+            return { id, name: f.name, mime: f.mime, size: f.data.length };
+          }),
+        );
+        await sql`insert into messages (chat_id, role, alias, text, attachments)
+                  values (${chatId}, 'user', ${p.alias}, ${text}, ${sql.json(attachments)})`;
+        const title = text.replace(MENTION, ' ').trim() || uploads[0]?.name || 'New chat';
+        if (!rows.length) await sql`update chats set title = ${title.slice(0, 60)} where id = ${chatId}`;
         await loop(chatId, p, emit);
       }),
 
