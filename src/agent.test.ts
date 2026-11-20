@@ -76,7 +76,7 @@ t('tool calls wait for approval, run once allowed, and other models see the chat
   await a.send(id, 'hello', r.emit);
   expect(r.events.find((e) => e.type === 'confirm')).toMatchObject({ calls: [{ server: 'test', tool: 'echo' }] });
   expect(ran).toEqual([]);
-  expect(seen[0]?.tools.map((x) => x.name)).toEqual(['test__echo']);
+  expect(seen[0]?.tools.map((x) => x.name)).toEqual(['generate_image', 'test__echo']);
 
   // 2. Deny: the model gets an error result, the tool never runs.
   r = collect();
@@ -106,6 +106,22 @@ t('tool calls wait for approval, run once allowed, and other models see the chat
   // 5. With no mention, the chat stays on the last model used.
   await a.send(id, 'and then?', collect().emit);
   expect(seen.at(-1)?.model).toBe('m2');
+});
+
+t('attached files are stored and reach the model with the message', async () => {
+  const store = memoryStore();
+  const a = agent(sql, box, mcpManager(sql, box, 'http://localhost'), store);
+  const [chat] = await sql<{ id: string }[]>`insert into chats default values returning id`;
+  const file = { name: 'notes.md', mime: 'text/markdown', data: new TextEncoder().encode('# hi') };
+  await a.send(chat!.id, '@gpt read this', collect().emit, [file]);
+  const user = seen.at(-1)!.history.at(-1)!;
+  expect(user.files).toEqual([file]);
+  const [row] = await sql<{ attachments: { id: string; name: string }[] }[]>`
+    select attachments from messages where chat_id = ${chat!.id} and role = 'user'`;
+  expect(row!.attachments).toMatchObject([{ name: 'notes.md', mime: 'text/markdown', size: 4 }]);
+  expect(await store.list(`console/files/${chat!.id}/`)).toHaveLength(1);
+  const [c] = await sql<{ title: string }[]>`select title from chats where id = ${chat!.id}`;
+  expect(c?.title).toBe('read this');
 });
 
 t('secret box round-trips and rejects tampering', () => {
